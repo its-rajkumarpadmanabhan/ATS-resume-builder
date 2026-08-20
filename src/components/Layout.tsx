@@ -557,7 +557,7 @@ export const Layout: React.FC<LayoutProps> = ({ data, onChange }) => {
                 Cancel
               </button>
               <button
-                onClick={() => { onChange(SAMPLE_RESUME_DATA); setShowResetConfirm(false); }}
+                onClick={() => { onChange(JSON.parse(JSON.stringify(SAMPLE_RESUME_DATA))); setShowResetConfirm(false); }}
                 className="px-4 py-2 text-xs bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-semibold transition"
               >
                 Yes, Reset
