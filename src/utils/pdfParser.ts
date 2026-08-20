@@ -1,40 +1,102 @@
 import * as pdfjsLib from 'pdfjs-dist';
+import * as mammoth from 'mammoth';
 import type { ResumeData } from '../types/resume';
 import { SAMPLE_RESUME_DATA } from './storage';
 
 // Initialize PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.mjs`;
 
-export async function extractTextFromPdf(file: File): Promise<string> {
+interface ParsedLine {
+  text: string;
+  headerHint: boolean;
+  size?: number;
+  bold?: boolean;
+}
+
+export async function extractPdfLines(file: File): Promise<ParsedLine[]> {
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
-  let fullText = '';
+  const lines: ParsedLine[] = [];
 
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
     const textContent = await page.getTextContent();
+    const rows: Record<string, any[]> = {};
     
-    let lastY = -1;
-    let pageText = '';
+    textContent.items.forEach((item: any) => {
+      if (!item.str || !item.str.trim()) return;
+      const y = item.transform[5];
+      const size = Math.hypot(item.transform[2], item.transform[3]) || Math.abs(item.transform[3]) || 10;
+      const bold = /bold|black|heavy|semibold/i.test(item.fontName || '');
+      const key = Math.round(y / 3) * 3;
+      if (!rows[key]) rows[key] = [];
+      rows[key].push({ str: item.str, x: item.transform[4], size, bold });
+    });
     
-    for (const item of textContent.items as any[]) {
-      if (lastY !== -1) {
-        const yDiff = Math.abs(item.transform[5] - lastY);
-        if (yDiff > 18) {
-          pageText += '\n\n';
-        } else if (yDiff > 5) {
-          pageText += '\n';
-        } else if (item.str.trim() !== '') {
-          pageText += ' ';
-        }
-      }
-      pageText += item.str;
-      lastY = item.transform[5];
-    }
-    fullText += pageText + '\n\n';
+    const keys = Object.keys(rows).map(Number).sort((a, b) => b - a);
+    keys.forEach(k => {
+      const items = rows[k].sort((a, b) => a.x - b.x);
+      const text = items.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim();
+      if (!text) return;
+      const maxSize = Math.max(...items.map(it => it.size));
+      const boldCount = items.filter(it => it.bold).length;
+      lines.push({ text, size: maxSize, bold: boldCount >= items.length / 2, headerHint: false });
+    });
+    lines.push({ text: '', headerHint: false }); // Page break
   }
 
-  return fullText;
+  const sizes = lines.filter(l => l.text).map(l => l.size!).filter(Boolean).sort((a, b) => a - b);
+  const median = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 10;
+
+  lines.forEach(l => {
+    if (!l.text) { l.headerHint = false; return; }
+    const wordCount = l.text.split(/\s+/).length;
+    l.headerHint = (l.size! >= median * 1.15 || !!l.bold) && wordCount <= 7 && !/[.:]$/.test(l.text);
+  });
+
+  return lines;
+}
+
+export async function extractDocxLines(file: File): Promise<ParsedLine[]> {
+  const buf = await file.arrayBuffer();
+  const result = await mammoth.convertToHtml({ arrayBuffer: buf });
+  const doc = new DOMParser().parseFromString(result.value, 'text/html');
+  const lines: ParsedLine[] = [];
+
+  function walk(node: any) {
+    if (node.nodeType !== 1) return;
+    const tag = node.tagName.toLowerCase();
+    if (/^h[1-6]$/.test(tag)){
+      const t = node.textContent.trim();
+      if (t) lines.push({ text: t, headerHint: true, bold: true });
+    } else if (tag === 'p'){
+      const t = node.textContent.trim();
+      if (!t){ lines.push({ text:'', headerHint:false }); return; }
+      const kids = Array.from(node.children) as HTMLElement[];
+      const isFullyBold = kids.length > 0 &&
+        kids.every(c => ['strong','b'].includes(c.tagName.toLowerCase())) &&
+        node.textContent.trim() === kids.map(c => c.textContent).join('').trim();
+      const wordCount = t.split(/\s+/).length;
+      lines.push({ text: t, headerHint: isFullyBold && wordCount <= 6 && !/[.,;:]$/.test(t), bold: isFullyBold });
+    } else if (tag === 'ul' || tag === 'ol'){
+      Array.from(node.querySelectorAll('li')).forEach((li: any) => {
+        const t = li.textContent.trim();
+        if (t) lines.push({ text: '- ' + t, headerHint:false });
+      });
+    } else if (tag === 'table'){
+      Array.from(node.querySelectorAll('tr')).forEach((tr: any) => {
+        const cells = Array.from(tr.querySelectorAll('td,th')).map((td: any) => td.textContent.trim()).filter(Boolean);
+        if (cells.length) lines.push({ text: cells.join('   '), headerHint:false });
+      });
+    } else if (node.childNodes.length){
+      Array.from(node.childNodes).forEach(walk);
+    } else {
+      const t = node.textContent.trim();
+      if (t) lines.push({ text: t, headerHint:false });
+    }
+  }
+  Array.from(doc.body.childNodes).forEach(walk);
+  return lines;
 }
 
 const parseDateRange = (text: string) => {
@@ -118,8 +180,9 @@ function chunkEntries(lines: string[]) {
   return blocks;
 }
 
-export async function parsePdfResume(file: File): Promise<ResumeData> {
-  const text = await extractTextFromPdf(file);
+export async function parseResumeFile(file: File): Promise<ResumeData> {
+  const isDocx = file.name.toLowerCase().endsWith('.docx');
+  const parsedLines = isDocx ? await extractDocxLines(file) : await extractPdfLines(file);
   
   const data: ResumeData = JSON.parse(JSON.stringify(SAMPLE_RESUME_DATA));
   
@@ -132,7 +195,7 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   data.projects = [];
   data.customSections = [];
 
-  const rawLines = text.split('\n').map(l => l.trim());
+  const rawLines = parsedLines.map(l => l.text);
   const lines = rawLines.filter(l => l.length > 0);
   
   const nameLine = lines.find(l => 
@@ -154,7 +217,10 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
     { key: 'projects', match: /(projects|portfolio)/i }
   ];
 
-  for (const line of rawLines) {
+  for (let i = 0; i < parsedLines.length; i++) {
+    const lineObj = parsedLines[i];
+    const line = lineObj.text;
+    
     if (!line) {
       sectionContent[currentSection].push('');
       continue;
@@ -168,6 +234,14 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
         break;
       }
     }
+    
+    // Typography fallback for headers if it doesn't match standard regex
+    if (!matchedHeader && lineObj.headerHint && line.length < 45 && !line.includes('@')) {
+       // We can dynamically add custom sections here in the future.
+       // For now, if it's a structural header we don't recognize, we can either ignore it or push it.
+       // The typography hint is incredibly useful for structure mapping.
+    }
+    
     if (!matchedHeader) {
       sectionContent[currentSection].push(line);
     }

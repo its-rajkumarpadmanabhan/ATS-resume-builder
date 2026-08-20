@@ -5,7 +5,7 @@ import { PreviewPanel } from './PreviewPanel';
 import { AtsScanner } from './AtsScanner';
 import { downloadPdf } from '../utils/pdf';
 import { SAMPLE_RESUME_DATA } from '../utils/storage';
-import { parsePdfResume } from '../utils/pdfParser';
+import { parseResumeFile } from '../utils/pdfParser';
 
 import {
   Download,
@@ -267,14 +267,14 @@ export const Layout: React.FC<LayoutProps> = ({ data, onChange }) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.name.toLowerCase().endsWith('.pdf')) {
+    if (file.name.toLowerCase().endsWith('.pdf') || file.name.toLowerCase().endsWith('.docx')) {
       try {
-        const parsedData = await parsePdfResume(file);
+        const parsedData = await parseResumeFile(file);
         onChange(parsedData);
         handleCloseFirstOpenAlert();
       } catch (err) {
-        console.error('Error parsing PDF', err);
-        alert('Failed to parse PDF resume. Make sure it is a readable text-based PDF.');
+        console.error('Error parsing resume', err);
+        alert('Failed to parse resume. Make sure it is a readable text-based PDF or DOCX file.');
       }
       e.target.value = '';
       return;
@@ -378,7 +378,7 @@ export const Layout: React.FC<LayoutProps> = ({ data, onChange }) => {
               <Upload className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Import JSON</span>
             </button>
-            <input type="file" ref={fileInputRef} onChange={handleJsonImport} accept=".json,.pdf" className="hidden" />
+            <input type="file" ref={fileInputRef} onChange={handleJsonImport} accept=".json,.pdf,.docx" className="hidden" />
             <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 px-2.5 py-1.5 bg-slate-900 border border-slate-800 text-slate-350 text-[10px] rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none transition duration-150 whitespace-nowrap z-[110] font-normal">
               Restore data from a previously exported JSON backup file
             </div>
