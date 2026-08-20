@@ -33,7 +33,10 @@ export async function extractTextFromPdf(file: File): Promise<string> {
 }
 
 const parseDateRange = (text: string) => {
-  const match = text.match(/((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4})\s*(?:-|–|to)\s*(present|current|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4})/i);
+  const dateTermSource = /(?:(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+)|(?:(?:0?[1-9]|1[0-2])[\/\-]))?(?:19|20)\d{2}/.source;
+  const rangeRegex = new RegExp(`(${dateTermSource})\\s*(?:-|–|to)\\s*(present|current|now|till now|${dateTermSource})`, 'i');
+  
+  const match = text.match(rangeRegex);
   if (match) {
     return {
       startDate: match[1].trim(),
@@ -41,6 +44,18 @@ const parseDateRange = (text: string) => {
       fullMatch: match[0]
     };
   }
+
+  // Fallback for single dates (like graduation year), only if they are the main content of the line
+  const singleDateRegex = new RegExp(`^\\s*(${dateTermSource})\\s*$`, 'i');
+  const singleMatch = text.match(singleDateRegex);
+  if (singleMatch && text.length < 30) {
+    return {
+      startDate: singleMatch[1].trim(),
+      endDate: singleMatch[1].trim(),
+      fullMatch: singleMatch[0]
+    };
+  }
+
   return null;
 }
 
@@ -116,10 +131,16 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
 
   // 3. Extract Name (guess first non-empty line with letters)
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  const nameLine = lines.find(l => /[a-zA-Z]{3,}/.test(l) && !l.includes('@') && !/\d/.test(l));
+  const nameLine = lines.find(l => 
+    /[a-zA-Z]{3,}/.test(l) && 
+    !l.includes('@') && 
+    !/\d/.test(l) &&
+    !/resume|curriculum vitae|cv/i.test(l)
+  );
+  
   if (nameLine) {
     const words = nameLine.split(' ');
-    data.personalInfo.name = words.slice(0, 3).join(' ').replace(/[^a-zA-Z\s]/g, '');
+    data.personalInfo.name = words.slice(0, 3).join(' ').replace(/[^a-zA-Z\s\-]/g, '');
   }
 
   // 4. Section Chunking
@@ -133,16 +154,16 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   };
 
   const sectionHeaders = [
-    { key: 'experience', match: /^(experience|employment|work history)$/i },
-    { key: 'education', match: /^(education|academic)$/i },
-    { key: 'skills', match: /^(skills|technologies|core competencies)$/i },
-    { key: 'projects', match: /^(projects|portfolio)$/i }
+    { key: 'experience', match: /(experience|employment|work history)/i },
+    { key: 'education', match: /(education|academic)/i },
+    { key: 'skills', match: /(skills|technologies|core competencies)/i },
+    { key: 'projects', match: /(projects|portfolio)/i }
   ];
 
   for (const line of lines) {
     let matchedHeader = false;
     for (const header of sectionHeaders) {
-      if (line.length < 30 && header.match.test(line.trim())) {
+      if (line.length < 40 && header.match.test(line.trim())) {
         currentSection = header.key;
         matchedHeader = true;
         break;
@@ -163,8 +184,18 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   const expChunks = chunkByDates(sectionContent.experience);
   if (expChunks.blocks.length > 0) {
     data.experience = expChunks.blocks.map(block => {
-      const position = block.headerLines[0] || 'Unknown Position';
-      const company = block.headerLines[1] || 'Unknown Company';
+      let position = block.headerLines[0] || 'Unknown Position';
+      let company = block.headerLines[1] || '';
+      
+      // If there's only 1 header line, try to split by common separators (e.g. "Software Engineer - Google")
+      if (block.headerLines.length === 1) {
+        const parts = block.headerLines[0].split(/\s*[|\-–,]\s*/);
+        if (parts.length >= 2) {
+          position = parts[0];
+          company = parts[1];
+        }
+      }
+
       return {
         id: crypto.randomUUID(),
         company,
@@ -193,8 +224,17 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   const eduChunks = chunkByDates(sectionContent.education);
   if (eduChunks.blocks.length > 0) {
     data.education = eduChunks.blocks.map(block => {
-      const degree = block.headerLines[0] || 'Unknown Degree';
-      const institution = block.headerLines[1] || 'Unknown Institution';
+      let degree = block.headerLines[0] || 'Unknown Degree';
+      let institution = block.headerLines[1] || '';
+      
+      if (block.headerLines.length === 1) {
+        const parts = block.headerLines[0].split(/\s*[|\-–,]\s*/);
+        if (parts.length >= 2) {
+          degree = parts[0];
+          institution = parts[1];
+        }
+      }
+
       return {
         id: crypto.randomUUID(),
         institution,
