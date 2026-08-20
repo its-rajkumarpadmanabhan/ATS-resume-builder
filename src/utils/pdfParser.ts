@@ -13,13 +13,69 @@ export async function extractTextFromPdf(file: File): Promise<string> {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const textContent = await page.getTextContent();
-    const pageText = textContent.items
-      .map((item: any) => item.str)
-      .join(' ');
-    fullText += pageText + '\n';
+    
+    let lastY = -1;
+    let pageText = '';
+    
+    for (const item of textContent.items as any[]) {
+      if (lastY !== -1 && Math.abs(item.transform[5] - lastY) > 5) {
+        pageText += '\n';
+      } else if (lastY !== -1 && item.str.trim() !== '') {
+        pageText += ' ';
+      }
+      pageText += item.str;
+      lastY = item.transform[5];
+    }
+    fullText += pageText + '\n\n';
   }
 
   return fullText;
+}
+
+const parseDateRange = (text: string) => {
+  const match = text.match(/((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4})\s*(?:-|–|to)\s*(present|current|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4})/i);
+  if (match) {
+    return {
+      startDate: match[1].trim(),
+      endDate: match[2].trim(),
+      fullMatch: match[0]
+    };
+  }
+  return null;
+}
+
+function chunkByDates(lines: string[]) {
+  const blocks: any[] = [];
+  let currentBlock: { headerLines: string[], dates: any, descriptionLines: string[] } | null = null;
+  let pendingHeaders: string[] = [];
+  
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const dateRange = parseDateRange(line);
+    
+    if (dateRange) {
+      if (currentBlock) {
+        blocks.push(currentBlock);
+      }
+      
+      const remainingLine = line.replace(dateRange.fullMatch, '').trim();
+      currentBlock = {
+        headerLines: [...pendingHeaders, remainingLine].filter(l => l.trim().length > 0),
+        dates: dateRange,
+        descriptionLines: []
+      };
+      pendingHeaders = [];
+    } else {
+      if (currentBlock) {
+        currentBlock.descriptionLines.push(line);
+      } else {
+        pendingHeaders.push(line);
+      }
+    }
+  }
+  
+  if (currentBlock) blocks.push(currentBlock);
+  return { blocks, unassigned: pendingHeaders };
 }
 
 export async function parsePdfResume(file: File): Promise<ResumeData> {
@@ -60,11 +116,10 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
 
   // 3. Extract Name (guess first non-empty line with letters)
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  const nameLine = lines.find(l => /[a-zA-Z]{3,}/.test(l));
+  const nameLine = lines.find(l => /[a-zA-Z]{3,}/.test(l) && !l.includes('@') && !/\d/.test(l));
   if (nameLine) {
-    // If the name line is huge, just take the first 3 words
     const words = nameLine.split(' ');
-    data.personalInfo.name = words.slice(0, 3).join(' ');
+    data.personalInfo.name = words.slice(0, 3).join(' ').replace(/[^a-zA-Z\s]/g, '');
   }
 
   // 4. Section Chunking
@@ -78,16 +133,16 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   };
 
   const sectionHeaders = [
-    { key: 'experience', match: /experience|employment|work history/i },
-    { key: 'education', match: /education|academic/i },
-    { key: 'skills', match: /skills|technologies|core competencies/i },
-    { key: 'projects', match: /projects|portfolio/i }
+    { key: 'experience', match: /^(experience|employment|work history)$/i },
+    { key: 'education', match: /^(education|academic)$/i },
+    { key: 'skills', match: /^(skills|technologies|core competencies)$/i },
+    { key: 'projects', match: /^(projects|portfolio)$/i }
   ];
 
   for (const line of lines) {
     let matchedHeader = false;
     for (const header of sectionHeaders) {
-      if (line.length < 30 && header.match.test(line)) {
+      if (line.length < 30 && header.match.test(line.trim())) {
         currentSection = header.key;
         matchedHeader = true;
         break;
@@ -100,13 +155,28 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   }
 
   // Map chunked text to our data structure
-  
   if (sectionContent.summary.length > 3) {
-    // The rest of the top part might be summary
     data.personalInfo.summary = sectionContent.summary.slice(1).join(' ').substring(0, 500);
   }
 
-  if (sectionContent.experience.length > 0) {
+  // Experience Parsing
+  const expChunks = chunkByDates(sectionContent.experience);
+  if (expChunks.blocks.length > 0) {
+    data.experience = expChunks.blocks.map(block => {
+      const position = block.headerLines[0] || 'Unknown Position';
+      const company = block.headerLines[1] || 'Unknown Company';
+      return {
+        id: crypto.randomUUID(),
+        company,
+        position,
+        startDate: block.dates.startDate,
+        endDate: block.dates.endDate,
+        location: '',
+        description: block.descriptionLines.join('\n').trim(),
+        customFields: []
+      };
+    });
+  } else if (sectionContent.experience.length > 0) {
     data.experience.push({
       id: crypto.randomUUID(),
       company: 'Extracted Experience',
@@ -114,12 +184,30 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
       startDate: '',
       endDate: '',
       location: '',
-      description: sectionContent.experience.join('\n').substring(0, 2000),
+      description: sectionContent.experience.join('\n'),
       customFields: []
     });
   }
 
-  if (sectionContent.education.length > 0) {
+  // Education Parsing
+  const eduChunks = chunkByDates(sectionContent.education);
+  if (eduChunks.blocks.length > 0) {
+    data.education = eduChunks.blocks.map(block => {
+      const degree = block.headerLines[0] || 'Unknown Degree';
+      const institution = block.headerLines[1] || 'Unknown Institution';
+      return {
+        id: crypto.randomUUID(),
+        institution,
+        degree,
+        fieldOfStudy: '',
+        startDate: block.dates.startDate,
+        endDate: block.dates.endDate,
+        location: '',
+        description: block.descriptionLines.join('\n').trim(),
+        customFields: []
+      };
+    });
+  } else if (sectionContent.education.length > 0) {
     data.education.push({
       id: crypto.randomUUID(),
       institution: 'Extracted Education',
@@ -128,7 +216,7 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
       startDate: '',
       endDate: '',
       location: '',
-      description: sectionContent.education.join('\n').substring(0, 1000),
+      description: sectionContent.education.join('\n'),
       customFields: []
     });
   }
@@ -137,7 +225,7 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
     data.skills.push({
       id: crypto.randomUUID(),
       category: 'Extracted Skills',
-      skills: sectionContent.skills.join(', ').substring(0, 500)
+      skills: sectionContent.skills.join(', ')
     });
   }
 
@@ -147,7 +235,7 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
       name: 'Extracted Projects',
       technologies: '',
       link: '',
-      description: sectionContent.projects.join('\n').substring(0, 1000),
+      description: sectionContent.projects.join('\n'),
       customFields: []
     });
   }
