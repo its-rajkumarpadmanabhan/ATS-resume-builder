@@ -167,54 +167,70 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   const actualSummary: string[] = [];
 
   for (let i = 0; i < summaryLines.length; i++) {
-    const line = summaryLines[i];
+    let line = summaryLines[i];
+    const originalLine = line;
     
     // Skip name line
     if (nameLine && line === nameLine) {
         continue;
     }
 
-    let isContactInfo = false;
+    let hasContactInfo = false;
 
     // Check for email
     const emailMatch = line.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
     if (emailMatch) {
       if (!data.personalInfo.email) data.personalInfo.email = emailMatch[0];
-      const stripped = line.replace(emailMatch[0], '').replace(/[|•,]/g, '').trim();
-      if (stripped.length < 5) isContactInfo = true;
+      line = line.replace(emailMatch[0], '');
+      hasContactInfo = true;
     }
 
     // Check for phone
     const phoneMatch = line.match(/(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
     if (phoneMatch) {
       if (!data.personalInfo.phone) data.personalInfo.phone = phoneMatch[0];
-      const stripped = line.replace(phoneMatch[0], '').replace(/[|•,]/g, '').trim();
-      if (stripped.length < 5) isContactInfo = true;
+      line = line.replace(phoneMatch[0], '');
+      hasContactInfo = true;
     }
     
     // Check for Links (LinkedIn, GitHub, etc.)
-    if (/linkedin\.com|github\.com|\.me|\.dev|\.io/i.test(line)) {
-       if (!data.personalInfo.website) {
-         data.personalInfo.website = line.replace(/[|•]/g, '').trim();
-       }
-       isContactInfo = true;
+    const linkMatch = line.match(/(?:https?:\/\/)?(?:www\.)?(?:linkedin\.com|github\.com|[a-zA-Z0-9-]+\.(?:me|dev|io))(?:\/[^\s]*)?/i);
+    if (linkMatch) {
+       if (!data.personalInfo.website) data.personalInfo.website = linkMatch[0];
+       line = line.replace(linkMatch[0], '');
+       hasContactInfo = true;
     }
 
-    // Check for Location (City, State format on short lines)
-    if (!isContactInfo && line.length < 30 && line.includes(',') && !/\d/.test(line) && !data.personalInfo.location) {
-       data.personalInfo.location = line.replace(/[|•]/g, '').trim();
-       isContactInfo = true;
+    // Check for Location (City, State format like "New York, NY")
+    // Only check if it's a short token or if the line has a comma
+    const locationMatch = line.match(/\b([A-Z][a-zA-Z\s]+,\s*[A-Z]{2})\b/);
+    if (locationMatch && !data.personalInfo.location) {
+       data.personalInfo.location = locationMatch[0];
+       line = line.replace(locationMatch[0], '');
+       hasContactInfo = true;
+    } else if (line.length < 30 && line.includes(',') && !/\d/.test(line) && !data.personalInfo.location) {
+       data.personalInfo.location = line.trim();
+       line = '';
+       hasContactInfo = true;
+    }
+
+    // Check if the remaining line is just separators
+    const stripped = line.replace(/[|•,\-–\s]/g, '');
+    
+    // If it was mostly contact info, don't add to summary
+    if (hasContactInfo && stripped.length < 15) {
+       continue;
     }
 
     // If it's a short line right below the name and has no contact info, it's likely the Job Title
-    if (!isContactInfo && i <= 4 && line.length < 40 && !data.personalInfo.title) {
-       data.personalInfo.title = line.replace(/[|•]/g, '').trim();
-       isContactInfo = true;
+    if (!hasContactInfo && i <= 4 && originalLine.length < 40 && !data.personalInfo.title) {
+       data.personalInfo.title = originalLine.replace(/[|•]/g, '').trim();
+       continue;
     }
 
     // If it wasn't matched as an isolated contact field, it belongs in the summary paragraph
-    if (!isContactInfo) {
-      actualSummary.push(line);
+    if (stripped.length > 0) {
+      actualSummary.push(originalLine);
     }
   }
 
