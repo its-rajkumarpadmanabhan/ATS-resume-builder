@@ -116,20 +116,7 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   data.projects = [];
   data.customSections = [];
 
-  // Basic Heuristic Parsing
-  // 1. Extract Email
-  const emailMatch = text.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
-  if (emailMatch) {
-    data.personalInfo.email = emailMatch[0];
-  }
-
-  // 2. Extract Phone (very basic regex)
-  const phoneMatch = text.match(/(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
-  if (phoneMatch) {
-    data.personalInfo.phone = phoneMatch[0];
-  }
-
-  // 3. Extract Name (guess first non-empty line with letters)
+  // 1. Extract Name (guess first non-empty line with letters)
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   const nameLine = lines.find(l => 
     /[a-zA-Z]{3,}/.test(l) && 
@@ -143,7 +130,7 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
     data.personalInfo.name = words.slice(0, 3).join(' ').replace(/[^a-zA-Z\s\-]/g, '');
   }
 
-  // 4. Section Chunking
+  // 2. Section Chunking
   let currentSection = 'summary';
   let sectionContent: Record<string, string[]> = {
     summary: [],
@@ -175,10 +162,67 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
     }
   }
 
-  // Map chunked text to our data structure
-  if (sectionContent.summary.length > 3) {
-    data.personalInfo.summary = sectionContent.summary.slice(1).join(' ').substring(0, 500);
+  // 3. Contact & Summary Parsing
+  const summaryLines = sectionContent.summary;
+  const actualSummary: string[] = [];
+
+  for (let i = 0; i < summaryLines.length; i++) {
+    const line = summaryLines[i];
+    
+    // Skip name line
+    if (nameLine && line === nameLine) {
+        continue;
+    }
+
+    let isContactInfo = false;
+
+    // Check for email
+    const emailMatch = line.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
+    if (emailMatch) {
+      if (!data.personalInfo.email) data.personalInfo.email = emailMatch[0];
+      const stripped = line.replace(emailMatch[0], '').replace(/[|•,]/g, '').trim();
+      if (stripped.length < 5) isContactInfo = true;
+    }
+
+    // Check for phone
+    const phoneMatch = line.match(/(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+    if (phoneMatch) {
+      if (!data.personalInfo.phone) data.personalInfo.phone = phoneMatch[0];
+      const stripped = line.replace(phoneMatch[0], '').replace(/[|•,]/g, '').trim();
+      if (stripped.length < 5) isContactInfo = true;
+    }
+    
+    // Check for Links (LinkedIn, GitHub, etc.)
+    if (/linkedin\.com|github\.com|\.me|\.dev|\.io/i.test(line)) {
+       if (!data.personalInfo.website) {
+         data.personalInfo.website = line.replace(/[|•]/g, '').trim();
+       }
+       isContactInfo = true;
+    }
+
+    // Check for Location (City, State format on short lines)
+    if (!isContactInfo && line.length < 30 && line.includes(',') && !/\d/.test(line) && !data.personalInfo.location) {
+       data.personalInfo.location = line.replace(/[|•]/g, '').trim();
+       isContactInfo = true;
+    }
+
+    // If it's a short line right below the name and has no contact info, it's likely the Job Title
+    if (!isContactInfo && i <= 4 && line.length < 40 && !data.personalInfo.title) {
+       data.personalInfo.title = line.replace(/[|•]/g, '').trim();
+       isContactInfo = true;
+    }
+
+    // If it wasn't matched as an isolated contact field, it belongs in the summary paragraph
+    if (!isContactInfo) {
+      actualSummary.push(line);
+    }
   }
+
+  // Clean up the actual summary
+  data.personalInfo.summary = actualSummary
+    .filter(l => l.replace(/[|•\s-]/g, '').length > 0)
+    .join(' ')
+    .substring(0, 1000);
 
   // Experience Parsing
   const expChunks = chunkByDates(sectionContent.experience);
