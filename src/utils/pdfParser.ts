@@ -18,10 +18,15 @@ export async function extractTextFromPdf(file: File): Promise<string> {
     let pageText = '';
     
     for (const item of textContent.items as any[]) {
-      if (lastY !== -1 && Math.abs(item.transform[5] - lastY) > 5) {
-        pageText += '\n';
-      } else if (lastY !== -1 && item.str.trim() !== '') {
-        pageText += ' ';
+      if (lastY !== -1) {
+        const yDiff = Math.abs(item.transform[5] - lastY);
+        if (yDiff > 18) {
+          pageText += '\n\n';
+        } else if (yDiff > 5) {
+          pageText += '\n';
+        } else if (item.str.trim() !== '') {
+          pageText += ' ';
+        }
       }
       pageText += item.str;
       lastY = item.transform[5];
@@ -34,7 +39,7 @@ export async function extractTextFromPdf(file: File): Promise<string> {
 
 const parseDateRange = (text: string) => {
   const dateTermSource = /(?:(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+)|(?:(?:0?[1-9]|1[0-2])[\/\-]))?(?:19|20)\d{2}/.source;
-  const rangeRegex = new RegExp(`(${dateTermSource})\\s*(?:-|–|to)\\s*(present|current|now|till now|${dateTermSource})`, 'i');
+  const rangeRegex = new RegExp(`(${dateTermSource})\\s*(?:-|–|—|−|to)\\s*(present|current|now|till now|${dateTermSource})`, 'i');
   
   const match = text.match(rangeRegex);
   if (match) {
@@ -45,7 +50,7 @@ const parseDateRange = (text: string) => {
     };
   }
 
-  // Fallback for single dates (like graduation year), only if they are the main content of the line
+  // Fallback for single dates (like graduation year)
   const singleDateRegex = new RegExp(`^\\s*(${dateTermSource})\\s*$`, 'i');
   const singleMatch = text.match(singleDateRegex);
   if (singleMatch && text.length < 30) {
@@ -96,19 +101,10 @@ function chunkByDates(lines: string[]) {
 export async function parsePdfResume(file: File): Promise<ResumeData> {
   const text = await extractTextFromPdf(file);
   
-  // Clone the default schema to ensure we have all required fields
   const data: ResumeData = JSON.parse(JSON.stringify(SAMPLE_RESUME_DATA));
   
   data.personalInfo = {
-    name: '',
-    title: '',
-    summary: '',
-    email: '',
-    phone: '',
-    location: '',
-    website: '',
-    socialLinks: [],
-    customFields: []
+    name: '', title: '', summary: '', email: '', phone: '', location: '', website: '', socialLinks: [], customFields: []
   };
   data.experience = [];
   data.education = [];
@@ -116,28 +112,19 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
   data.projects = [];
   data.customSections = [];
 
-  // 1. Extract Name (guess first non-empty line with letters)
-  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  const nameLine = lines.find(l => 
-    /[a-zA-Z]{3,}/.test(l) && 
-    !l.includes('@') && 
-    !/\d/.test(l) &&
-    !/resume|curriculum vitae|cv/i.test(l)
-  );
+  const rawLines = text.split('\n');
+  const lines = rawLines.map(l => l.trim()).filter(l => l.length > 0);
   
+  const nameLine = lines.find(l => 
+    /[a-zA-Z]{3,}/.test(l) && !l.includes('@') && !/\d/.test(l) && !/resume|curriculum vitae|cv/i.test(l)
+  );
   if (nameLine) {
-    const words = nameLine.split(' ');
-    data.personalInfo.name = words.slice(0, 3).join(' ').replace(/[^a-zA-Z\s\-]/g, '');
+    data.personalInfo.name = nameLine.split(' ').slice(0, 3).join(' ').replace(/[^a-zA-Z\s\-]/g, '');
   }
 
-  // 2. Section Chunking
   let currentSection = 'summary';
   let sectionContent: Record<string, string[]> = {
-    summary: [],
-    experience: [],
-    education: [],
-    skills: [],
-    projects: []
+    summary: [], experience: [], education: [], skills: [], projects: []
   };
 
   const sectionHeaders = [
@@ -156,13 +143,11 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
         break;
       }
     }
-    
     if (!matchedHeader) {
       sectionContent[currentSection].push(line);
     }
   }
 
-  // 3. Contact & Summary Parsing
   const summaryLines = sectionContent.summary;
   const actualSummary: string[] = [];
 
@@ -170,14 +155,10 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
     let line = summaryLines[i];
     const originalLine = line;
     
-    // Skip name line
-    if (nameLine && line === nameLine) {
-        continue;
-    }
+    if (nameLine && line === nameLine) continue;
 
     let hasContactInfo = false;
 
-    // Check for email
     const emailMatch = line.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
     if (emailMatch) {
       if (!data.personalInfo.email) data.personalInfo.email = emailMatch[0];
@@ -185,15 +166,13 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
       hasContactInfo = true;
     }
 
-    // Check for phone
-    const phoneMatch = line.match(/(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
-    if (phoneMatch) {
+    const phoneMatch = line.match(/(?:\+?[0-9]{1,3}[\s.-]?)?\(?[0-9]{2,4}\)?[\s.-]?[0-9]{3,4}[\s.-]?[0-9]{3,4}/);
+    if (phoneMatch && phoneMatch[0].replace(/\D/g, '').length >= 10) {
       if (!data.personalInfo.phone) data.personalInfo.phone = phoneMatch[0];
       line = line.replace(phoneMatch[0], '');
       hasContactInfo = true;
     }
     
-    // Check for Links (LinkedIn, GitHub, etc.)
     const linkMatch = line.match(/(?:https?:\/\/)?(?:www\.)?(?:linkedin\.com|github\.com|[a-zA-Z0-9-]+\.(?:me|dev|io))(?:\/[^\s]*)?/i);
     if (linkMatch) {
        if (!data.personalInfo.website) data.personalInfo.website = linkMatch[0];
@@ -201,8 +180,6 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
        hasContactInfo = true;
     }
 
-    // Check for Location (City, State format like "New York, NY")
-    // Only check if it's a short token or if the line has a comma
     const locationMatch = line.match(/\b([A-Z][a-zA-Z\s]+,\s*[A-Z]{2})\b/);
     if (locationMatch && !data.personalInfo.location) {
        data.personalInfo.location = locationMatch[0];
@@ -214,73 +191,45 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
        hasContactInfo = true;
     }
 
-    // Check if the remaining line is just separators
     const stripped = line.replace(/[|•,\-–\s]/g, '');
-    
-    // If it was mostly contact info, don't add to summary
-    if (hasContactInfo && stripped.length < 15) {
-       continue;
-    }
+    if (hasContactInfo && stripped.length < 15) continue;
 
-    // If it's a short line right below the name and has no contact info, it's likely the Job Title
     if (!hasContactInfo && i <= 4 && originalLine.length < 40 && !data.personalInfo.title) {
        data.personalInfo.title = originalLine.replace(/[|•]/g, '').trim();
        continue;
     }
 
-    // If it wasn't matched as an isolated contact field, it belongs in the summary paragraph
     if (stripped.length > 0) {
       actualSummary.push(originalLine);
     }
   }
 
-  // Clean up the actual summary
-  data.personalInfo.summary = actualSummary
-    .filter(l => l.replace(/[|•\s-]/g, '').length > 0)
-    .join(' ')
-    .substring(0, 1000);
+  data.personalInfo.summary = actualSummary.filter(l => l.replace(/[|•\s-]/g, '').length > 0).join(' ').substring(0, 1000);
 
-  // Experience Parsing
   const expChunks = chunkByDates(sectionContent.experience);
   if (expChunks.blocks.length > 0) {
     data.experience = expChunks.blocks.map(block => {
       let position = block.headerLines[0] || 'Unknown Position';
       let company = block.headerLines[1] || '';
       
-      // If there's only 1 header line, try to split by common separators (e.g. "Software Engineer - Google")
       if (block.headerLines.length === 1) {
         const parts = block.headerLines[0].split(/\s*[|\-–,]\s*/);
         if (parts.length >= 2) {
-          position = parts[0];
-          company = parts[1];
+          position = parts[0].trim();
+          company = parts[1].trim();
         }
       }
 
       return {
-        id: crypto.randomUUID(),
-        company,
-        position,
-        startDate: block.dates.startDate,
-        endDate: block.dates.endDate,
-        location: '',
-        description: block.descriptionLines.join('\n').trim(),
-        customFields: []
+        id: crypto.randomUUID(), company, position, startDate: block.dates.startDate, endDate: block.dates.endDate, location: '', description: block.descriptionLines.join('\n').trim(), customFields: []
       };
     });
   } else if (sectionContent.experience.length > 0) {
     data.experience.push({
-      id: crypto.randomUUID(),
-      company: 'Extracted Experience',
-      position: '',
-      startDate: '',
-      endDate: '',
-      location: '',
-      description: sectionContent.experience.join('\n'),
-      customFields: []
+      id: crypto.randomUUID(), company: 'Extracted Experience', position: '', startDate: '', endDate: '', location: '', description: sectionContent.experience.join('\n'), customFields: []
     });
   }
 
-  // Education Parsing
   const eduChunks = chunkByDates(sectionContent.education);
   if (eduChunks.blocks.length > 0) {
     data.education = eduChunks.blocks.map(block => {
@@ -290,53 +239,30 @@ export async function parsePdfResume(file: File): Promise<ResumeData> {
       if (block.headerLines.length === 1) {
         const parts = block.headerLines[0].split(/\s*[|\-–,]\s*/);
         if (parts.length >= 2) {
-          degree = parts[0];
-          institution = parts[1];
+          degree = parts[0].trim();
+          institution = parts[1].trim();
         }
       }
 
       return {
-        id: crypto.randomUUID(),
-        institution,
-        degree,
-        fieldOfStudy: '',
-        startDate: block.dates.startDate,
-        endDate: block.dates.endDate,
-        location: '',
-        description: block.descriptionLines.join('\n').trim(),
-        customFields: []
+        id: crypto.randomUUID(), institution, degree, fieldOfStudy: '', startDate: block.dates.startDate, endDate: block.dates.endDate, location: '', description: block.descriptionLines.join('\n').trim(), customFields: []
       };
     });
   } else if (sectionContent.education.length > 0) {
     data.education.push({
-      id: crypto.randomUUID(),
-      institution: 'Extracted Education',
-      degree: '',
-      fieldOfStudy: '',
-      startDate: '',
-      endDate: '',
-      location: '',
-      description: sectionContent.education.join('\n'),
-      customFields: []
+      id: crypto.randomUUID(), institution: 'Extracted Education', degree: '', fieldOfStudy: '', startDate: '', endDate: '', location: '', description: sectionContent.education.join('\n'), customFields: []
     });
   }
 
   if (sectionContent.skills.length > 0) {
     data.skills.push({
-      id: crypto.randomUUID(),
-      category: 'Extracted Skills',
-      skills: sectionContent.skills.join(', ')
+      id: crypto.randomUUID(), category: 'Extracted Skills', skills: sectionContent.skills.join(', ')
     });
   }
 
   if (sectionContent.projects.length > 0) {
     data.projects.push({
-      id: crypto.randomUUID(),
-      name: 'Extracted Projects',
-      technologies: '',
-      link: '',
-      description: sectionContent.projects.join('\n'),
-      customFields: []
+      id: crypto.randomUUID(), name: 'Extracted Projects', technologies: '', link: '', description: sectionContent.projects.join('\n'), customFields: []
     });
   }
 
